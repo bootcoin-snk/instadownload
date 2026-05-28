@@ -1,3 +1,4 @@
+import os
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from pathlib import Path
@@ -30,7 +31,11 @@ if not FFPROBE_PATH:
     FFPROBE_PATH = shutil.which("ffprobe")
 
 app = Flask(__name__)
-CORS(app, origins=["*"])
+allowed_frontend = os.environ.get("FRONTEND_ORIGIN", "*")
+if allowed_frontend == "*":
+    CORS(app, origins=["*"])
+else:
+    CORS(app, origins=[allowed_frontend])
 
 BASE_DIR = Path(__file__).resolve().parent
 DOWNLOAD_DIR = BASE_DIR / "downloads"
