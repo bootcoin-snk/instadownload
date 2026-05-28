@@ -6,12 +6,15 @@ import uuid
 import time
 import subprocess
 import shutil
+import json
 
 try:
     import imageio_ffmpeg
     FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
+    FFPROBE_PATH = imageio_ffmpeg.get_ffprobe_exe()
 except Exception:
     FFMPEG_PATH = None
+    FFPROBE_PATH = None
 
 app = Flask(__name__)
 CORS(app, origins=["*"])
@@ -48,78 +51,140 @@ def clean_old_files(max_age_hours=24):
             except Exception:
                 pass
 
+
+def probe_streams(input_file: Path):
+    probe_exe = FFPROBE_PATH or FFMPEG_PATH
+    if not probe_exe:
+        return {"has_video": False, "has_audio": False, "streams": []}
+
+    try:
+        probe_cmd = [
+            probe_exe, "-v", "quiet", "-print_format", "json",
+            "-show_format", "-show_streams", str(input_file)
+        ]
+        result = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=30)
+        data = json.loads(result.stdout) if result.stdout else {}
+        streams = data.get("streams", [])
+        has_video = any(s.get("codec_type") == "video" for s in streams)
+        has_audio = any(s.get("codec_type") == "audio" for s in streams)
+        return {"has_video": has_video, "has_audio": has_audio, "streams": streams}
+    except Exception:
+        return {"has_video": False, "has_audio": False, "streams": []}
+
+
 def convert_to_quicktime_mp4(input_file: Path, output_file: Path, timeout=300):
     """
-    Conversão final com múltiplas estratégias de fallback para compatibilidade máxima.
-    Tenta: 1) Copiar sem re-encoding, 2) Re-encoding rápido, 3) Vídeo-only
+    Conversão final com suporte robusto para áudio.
+    Detecta streams e escolhe a melhor estratégia.
     """
     if not FFMPEG_PATH:
         raise RuntimeError("FFmpeg não está disponível. Verifique se imageio-ffmpeg foi instalado.")
 
-    strategies = [
-        # Estratégia 1: Copiar sem re-encoding (mais rápido para TikTok)
-        {
-            "name": "direct_copy",
-            "cmd": [
-                FFMPEG_PATH, "-y", "-i", str(input_file),
-                "-map", "0:v:0", "-map", "0:a?",
-                "-c:v", "copy", "-c:a", "copy",
-                "-movflags", "+faststart",
-                str(output_file)
-            ]
-        },
-        # Estratégia 2: Re-encoding ultra-rápido
-        {
-            "name": "ultrafast_encode",
-            "cmd": [
-                FFMPEG_PATH, "-y", "-i", str(input_file),
-                "-map", "0:v:0", "-map", "0:a?",
-                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
-                "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-b:a", "128k", "-ac", "2",
-                "-movflags", "+faststart",
-                str(output_file)
-            ]
-        },
-        # Estratégia 3: Vídeo-only (fallback final)
-        {
-            "name": "video_only",
-            "cmd": [
-                FFMPEG_PATH, "-y", "-i", str(input_file),
-                "-map", "0:v:0",
-                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
-                "-pix_fmt", "yuv420p",
-                "-movflags", "+faststart",
-                str(output_file)
-            ]
-        }
-    ]
+    # Detecta streams disponíveis no arquivo
+    probe = probe_streams(input_file)
+    has_video = probe.get("has_video", False)
+    has_audio = probe.get("has_audio", False)
+    audio_streams = [s for s in probe.get("streams", []) if s.get("codec_type") == "audio"]
 
-    last_error = None
-    for strategy in strategies:
+    # Estratégia 1: Com áudio (se disponível)
+    if has_audio and audio_streams:
+        cmd = [
+            FFMPEG_PATH,
+            "-y",
+            "-i", str(input_file),
+            "-map", "0:v:0",
+            "-map", "0:a:0",  # Pega primeiro stream de áudio
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "23",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-ac", "2",
+            "-movflags", "+faststart",
+            str(output_file)
+        ]
+        
         try:
             result = subprocess.run(
-                strategy["cmd"],
+                cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
                 timeout=timeout
             )
-
+            
             if result.returncode == 0:
                 return  # Sucesso!
-            else:
-                last_error = result.stderr[-500:] if result.stderr else "Unknown error"
-                # Continua para próxima estratégia
         except subprocess.TimeoutExpired:
-            last_error = f"Timeout after {timeout}s"
-            # Continua para próxima estratégia
-        except Exception as e:
-            last_error = str(e)
-            # Continua para próxima estratégia
+            pass
+        except Exception:
+            pass
 
-    # Se chegou aqui, todas as estratégias falharam
-    raise RuntimeError(f"FFmpeg failed all strategies. Last error: {last_error}")
+    # Estratégia 2: Tenta com qualquer áudio disponível
+    if has_audio:
+        cmd = [
+            FFMPEG_PATH,
+            "-y",
+            "-i", str(input_file),
+            "-map", "0:v:0",
+            "-map", "0:a?",  # Qualquer áudio
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-crf", "28",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-ac", "2",
+            "-movflags", "+faststart",
+            str(output_file)
+        ]
+        
+        try:
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=timeout
+            )
+            
+            if result.returncode == 0:
+                return  # Sucesso!
+        except subprocess.TimeoutExpired:
+            pass
+        except Exception:
+            pass
+
+    # Estratégia 3: Vídeo-only (último recurso)
+    cmd = [
+        FFMPEG_PATH,
+        "-y",
+        "-i", str(input_file),
+        "-map", "0:v:0",
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-crf", "28",
+        "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
+        str(output_file)
+    ]
+    
+    try:
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout
+        )
+        
+        if result.returncode == 0:
+            return  # Sucesso!
+        else:
+            raise RuntimeError(f"FFmpeg failed: {result.stderr[-500:]}")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"Conversão FFmpeg excedeu {timeout}s - arquivo muito grande")
 
 @app.route("/api/health", methods=["GET"])
 def health():
@@ -159,15 +224,11 @@ def download_video():
     
     if is_tiktok:
         format_selector = (
-            "best[ext=mp4]/best"  # Preferir MP4 já pronto para evitar conversão
+            "bestvideo[ext=mp4]+bestaudio/bestvideo+bestaudio/best"
         )
     else:
         format_selector = (
-            "bv[ext=mp4]+ba[ext=m4a]/"
-            "bv*[vcodec^=avc1]+ba[ext=m4a]/"
-            "bv*+ba/"
-            "best[ext=mp4][vcodec!=none][acodec!=none]/"
-            "best"
+            "bestvideo[ext=mp4]+bestaudio/bestvideo+bestaudio/best"
         )
 
     # Headers específicos para cada plataforma
@@ -182,6 +243,7 @@ def download_video():
         "outtmpl": raw_template,
         "format": format_selector,
         "merge_output_format": "mp4",
+        "prefer_ffmpeg": True,
         "ffmpeg_location": FFMPEG_PATH,
         "noplaylist": True,
         "quiet": True,
@@ -240,28 +302,29 @@ def download_video():
                 error_msg = "TikTok bloqueou o download. Tente: 1) Clicar em outro vídeo e voltar 2) Usar uma URL diferente"
             return jsonify({"error": error_msg}), 400
 
-        # Otimização: Se o arquivo já é MP4, apenas renomeia (evita conversão demorada)
+        # Se o arquivo já é MP4 com áudio e vídeo, apenas copia para evitar conversão danificada.
         if raw_file.suffix.lower() == ".mp4":
-            try:
-                shutil.copy2(raw_file, final_path)
-                # Limpa arquivo bruto
-                for file in DOWNLOAD_DIR.glob(f"{job_id}-raw*"):
-                    try:
-                        if file.name != final_filename:
-                            file.unlink()
-                    except Exception:
-                        pass
-                
-                return jsonify({
-                    "success": True,
-                    "filename": final_filename,
-                    "download_url": f"/downloads/{final_filename}",
-                    "ffmpeg_available": True
-                })
-            except Exception as e:
-                pass  # Se copiar falhar, continua com conversão
+            probe = probe_streams(raw_file)
+            if probe["has_video"] and probe["has_audio"]:
+                try:
+                    shutil.copy2(raw_file, final_path)
+                except Exception:
+                    pass
+                else:
+                    for file in DOWNLOAD_DIR.glob(f"{job_id}-raw*"):
+                        try:
+                            if file.name != final_filename:
+                                file.unlink()
+                        except Exception:
+                            pass
+                    return jsonify({
+                        "success": True,
+                        "filename": final_filename,
+                        "download_url": f"/downloads/{final_filename}",
+                        "ffmpeg_available": True
+                    })
 
-        # Conversão necessária (arquivo não é MP4 ou cópia falhou)
+        # FFmpeg conversão é necessária para preservar áudio e garantir compatibilidade
         try:
             convert_to_quicktime_mp4(raw_file, final_path)
         except subprocess.TimeoutExpired:
