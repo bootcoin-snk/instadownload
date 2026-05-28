@@ -1,33 +1,41 @@
-# Backend Flask - Social Video Downloader
+# Backend Flask - Social Downloader
 
-## Rodar local
+Backend atualizado para converter os vídeos para MP4 compatível com Mac/QuickTime:
+- Vídeo: H.264
+- Áudio: AAC
+- Container: MP4
+- `faststart` ativado
+
+## Render
+
+Use:
 
 ```bash
-cd backend-flask
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-python app.py
+Build Command:
+./render-build.sh
 ```
 
-Teste:
 ```bash
-curl http://localhost:5001/api/health
-```
-
-## Deploy sugerido
-
-Use Render, Railway, Fly.io ou VPS.
-
-Comando de start:
-```bash
+Start Command:
 gunicorn app:app
 ```
 
-Depois copie a URL pública do backend e troque no arquivo:
+Se o Render reclamar de permissão no build script, use este Build Command:
 
-```js
-const API_BASE_URL = "https://sua-api.com";
+```bash
+chmod +x render-build.sh && ./render-build.sh
 ```
 
-em `frontend-netlify/script.js`.
+## Teste
+
+Depois do deploy, abra:
+
+```txt
+https://sua-api.onrender.com/api/health
+```
+
+Deve retornar:
+
+```json
+{"ok": true}
+```

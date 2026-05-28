@@ -2,7 +2,6 @@ from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from pathlib import Path
 import yt_dlp
-import os
 import uuid
 import time
 
@@ -32,6 +31,7 @@ def is_allowed_url(url: str) -> bool:
 def clean_old_files(max_age_hours=24):
     now = time.time()
     max_age = max_age_hours * 60 * 60
+
     for file in DOWNLOAD_DIR.glob("*"):
         if file.is_file() and now - file.stat().st_mtime > max_age:
             try:
@@ -58,13 +58,28 @@ def download_video():
 
     job_id = str(uuid.uuid4())[:8]
 
+    # Configuração ajustada para gerar MP4 compatível com QuickTime/Mac:
+    # H.264 para vídeo + AAC para áudio + faststart.
     ydl_opts = {
         "outtmpl": str(DOWNLOAD_DIR / f"{job_id}-%(title).120s.%(ext)s"),
-        "format": "bestvideo+bestaudio/best",
+        "format": "bv*+ba/b",
         "merge_output_format": "mp4",
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
+
+        "postprocessors": [
+            {
+                "key": "FFmpegVideoConvertor",
+                "preferedformat": "mp4"
+            }
+        ],
+
+        "postprocessor_args": [
+            "-c:v", "libx264",
+            "-c:a", "aac",
+            "-movflags", "+faststart"
+        ]
     }
 
     try:
@@ -76,10 +91,14 @@ def download_video():
         after = set(DOWNLOAD_DIR.glob("*"))
         new_files = sorted(after - before, key=lambda p: p.stat().st_mtime, reverse=True)
 
-        if not new_files:
+        # Garante preferência por MP4 final, caso o yt-dlp gere arquivos temporários.
+        mp4_files = [file for file in new_files if file.suffix.lower() == ".mp4"]
+        final_files = mp4_files or new_files
+
+        if not final_files:
             return jsonify({"error": "Download concluído, mas o arquivo não foi encontrado."}), 500
 
-        filename = new_files[0].name
+        filename = final_files[0].name
 
         return jsonify({
             "success": True,
@@ -89,7 +108,7 @@ def download_video():
 
     except Exception as e:
         return jsonify({
-            "error": "Não foi possível baixar este vídeo. Verifique se o link é público e autorizado.",
+            "error": "Não foi possível baixar/converter este vídeo. Verifique se o link é público e autorizado.",
             "details": str(e)
         }), 500
 
