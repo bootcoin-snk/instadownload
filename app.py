@@ -4,7 +4,6 @@ from pathlib import Path
 import yt_dlp
 import uuid
 import time
-import os
 
 try:
     import imageio_ffmpeg
@@ -67,9 +66,19 @@ def download_video():
     job_id = str(uuid.uuid4())[:8]
     output_template = str(DOWNLOAD_DIR / f"{job_id}-%(title).120s.%(ext)s")
 
+    # Ordem importante:
+    # 1. Primeiro tenta baixar arquivo único com vídeo + áudio, ideal para TikTok.
+    # 2. Se não existir, baixa vídeo + áudio separados e mescla com FFmpeg.
+    # 3. Depois converte para MP4 H.264/AAC compatível com QuickTime/Mac.
     ydl_opts = {
         "outtmpl": output_template,
-        "format": "bv*[vcodec^=avc1]+ba[acodec^=mp4a]/b[ext=mp4]/bv*+ba/b",
+        "format": (
+            "best[ext=mp4][acodec!=none][vcodec!=none]/"
+            "best[acodec!=none][vcodec!=none]/"
+            "bv*[vcodec^=avc1]+ba/"
+            "bv*+ba/"
+            "best"
+        ),
         "merge_output_format": "mp4",
         "recodevideo": "mp4",
         "postprocessor_args": {
@@ -79,6 +88,11 @@ def download_video():
                 "-c:a", "aac",
                 "-b:a", "192k",
                 "-movflags", "+faststart"
+            ],
+            "Merger": [
+                "-c:v", "copy",
+                "-c:a", "aac",
+                "-b:a", "192k"
             ]
         },
         "noplaylist": True,

@@ -1,8 +1,10 @@
 # Backend Flask - Social Downloader
 
-Versão corrigida para Render.
+Correção para TikTok sem áudio.
 
-Esta versão usa `imageio-ffmpeg`, então não precisa instalar FFmpeg com `apt-get`.
+Esta versão prioriza baixar arquivos que já venham com vídeo + áudio juntos,
+o que resolve o caso comum do TikTok. Quando necessário, ainda usa FFmpeg via
+`imageio-ffmpeg` para mesclar e converter para MP4 compatível com Mac/QuickTime.
 
 ## Render
 
@@ -18,21 +20,15 @@ Start Command:
 gunicorn app:app
 ```
 
-Não use:
-
-```bash
-apt-get install ffmpeg
-```
-
 ## Teste
 
-Depois do deploy, abra:
+Depois do deploy:
 
 ```txt
 https://instadownload-mfjw.onrender.com/api/health
 ```
 
-O ideal é retornar algo como:
+O ideal é retornar:
 
 ```json
 {
@@ -40,5 +36,3 @@ O ideal é retornar algo como:
   "ffmpeg_available": true
 }
 ```
-
-Se `ffmpeg_available` vier `false`, o Render não instalou as dependências corretamente.
