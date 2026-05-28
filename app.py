@@ -59,23 +59,48 @@ def clean_old_files(max_age_hours=24):
 
 
 def probe_streams(input_file: Path):
-    probe_exe = FFPROBE_PATH or FFMPEG_PATH
-    if not probe_exe:
+    if not FFMPEG_PATH and not FFPROBE_PATH:
         return {"has_video": False, "has_audio": False, "streams": []}
 
-    try:
-        probe_cmd = [
-            probe_exe, "-v", "quiet", "-print_format", "json",
-            "-show_format", "-show_streams", str(input_file)
-        ]
-        result = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=30)
-        data = json.loads(result.stdout) if result.stdout else {}
-        streams = data.get("streams", [])
-        has_video = any(s.get("codec_type") == "video" for s in streams)
-        has_audio = any(s.get("codec_type") == "audio" for s in streams)
-        return {"has_video": has_video, "has_audio": has_audio, "streams": streams}
-    except Exception:
-        return {"has_video": False, "has_audio": False, "streams": []}
+    # Prefere ffprobe quando disponível, pois entrega JSON confiável.
+    if FFPROBE_PATH:
+        try:
+            probe_cmd = [
+                FFPROBE_PATH, "-v", "quiet", "-print_format", "json",
+                "-show_format", "-show_streams", str(input_file)
+            ]
+            result = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=30)
+            data = json.loads(result.stdout) if result.stdout else {}
+            streams = data.get("streams", [])
+            has_video = any(s.get("codec_type") == "video" for s in streams)
+            has_audio = any(s.get("codec_type") == "audio" for s in streams)
+            return {"has_video": has_video, "has_audio": has_audio, "streams": streams}
+        except Exception:
+            pass
+
+    # Fallback para ffmpeg quando ffprobe não está disponível.
+    if FFMPEG_PATH:
+        try:
+            probe_cmd = [
+                FFMPEG_PATH, "-hide_banner", "-loglevel", "error",
+                "-i", str(input_file)
+            ]
+            result = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=30)
+            stderr = result.stderr or ""
+            streams = []
+            for line in stderr.splitlines():
+                if "Stream #" in line:
+                    if "Video:" in line:
+                        streams.append({"codec_type": "video"})
+                    elif "Audio:" in line:
+                        streams.append({"codec_type": "audio"})
+            has_video = any(s.get("codec_type") == "video" for s in streams)
+            has_audio = any(s.get("codec_type") == "audio" for s in streams)
+            return {"has_video": has_video, "has_audio": has_audio, "streams": streams}
+        except Exception:
+            pass
+
+    return {"has_video": False, "has_audio": False, "streams": []}
 
 
 def convert_to_quicktime_mp4(input_file: Path, output_file: Path, timeout=300):
