@@ -50,80 +50,76 @@ def clean_old_files(max_age_hours=24):
 
 def convert_to_quicktime_mp4(input_file: Path, output_file: Path, timeout=300):
     """
-    Conversão final manual para máxima compatibilidade:
-    - vídeo H.264
-    - áudio AAC (se disponível)
-    - pixel format yuv420p
-    - faststart
-    - mapeia áudio se existir (com fallback para vídeo-only)
+    Conversão final com múltiplas estratégias de fallback para compatibilidade máxima.
+    Tenta: 1) Copiar sem re-encoding, 2) Re-encoding rápido, 3) Vídeo-only
     """
     if not FFMPEG_PATH:
         raise RuntimeError("FFmpeg não está disponível. Verifique se imageio-ffmpeg foi instalado.")
 
-    # Tenta com áudio primeiro
-    cmd = [
-        FFMPEG_PATH,
-        "-y",
-        "-i", str(input_file),
-
-        "-map", "0:v:0",
-        "-map", "0:a?",  # Mapeando qualquer áudio disponível
-
-        "-c:v", "libx264",
-        "-preset", "veryfast",
-        "-crf", "23",
-        "-pix_fmt", "yuv420p",
-
-        "-c:a", "aac",
-        "-b:a", "192k",
-        "-ac", "2",
-
-        "-movflags", "+faststart",
-        str(output_file)
+    strategies = [
+        # Estratégia 1: Copiar sem re-encoding (mais rápido para TikTok)
+        {
+            "name": "direct_copy",
+            "cmd": [
+                FFMPEG_PATH, "-y", "-i", str(input_file),
+                "-map", "0:v:0", "-map", "0:a?",
+                "-c:v", "copy", "-c:a", "copy",
+                "-movflags", "+faststart",
+                str(output_file)
+            ]
+        },
+        # Estratégia 2: Re-encoding ultra-rápido
+        {
+            "name": "ultrafast_encode",
+            "cmd": [
+                FFMPEG_PATH, "-y", "-i", str(input_file),
+                "-map", "0:v:0", "-map", "0:a?",
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "128k", "-ac", "2",
+                "-movflags", "+faststart",
+                str(output_file)
+            ]
+        },
+        # Estratégia 3: Vídeo-only (fallback final)
+        {
+            "name": "video_only",
+            "cmd": [
+                FFMPEG_PATH, "-y", "-i", str(input_file),
+                "-map", "0:v:0",
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+                "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart",
+                str(output_file)
+            ]
+        }
     ]
 
-    try:
-        result = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=timeout
-        )
+    last_error = None
+    for strategy in strategies:
+        try:
+            result = subprocess.run(
+                strategy["cmd"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=timeout
+            )
 
-        if result.returncode != 0:
-            # Se falhar, tenta sem áudio como fallback
-            stderr_msg = result.stderr.lower()
-            if "audio" in stderr_msg or "stream" in stderr_msg:
-                cmd_no_audio = [
-                    FFMPEG_PATH,
-                    "-y",
-                    "-i", str(input_file),
-                    "-map", "0:v:0",
-                    "-c:v", "libx264",
-                    "-preset", "veryfast",
-                    "-crf", "23",
-                    "-pix_fmt", "yuv420p",
-                    "-movflags", "+faststart",
-                    str(output_file)
-                ]
-                
-                result = subprocess.run(
-                    cmd_no_audio,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    timeout=timeout
-                )
-                
-                if result.returncode != 0:
-                    error_msg = result.stderr[-2000:] if result.stderr else "Erro desconhecido no FFmpeg"
-                    raise RuntimeError(f"FFmpeg failed: {error_msg}")
+            if result.returncode == 0:
+                return  # Sucesso!
             else:
-                error_msg = result.stderr[-2000:] if result.stderr else "Erro desconhecido no FFmpeg"
-                raise RuntimeError(f"FFmpeg failed: {error_msg}")
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(f"Conversão FFmpeg excedeu {timeout}s - arquivo muito grande")
+                last_error = result.stderr[-500:] if result.stderr else "Unknown error"
+                # Continua para próxima estratégia
+        except subprocess.TimeoutExpired:
+            last_error = f"Timeout after {timeout}s"
+            # Continua para próxima estratégia
+        except Exception as e:
+            last_error = str(e)
+            # Continua para próxima estratégia
+
+    # Se chegou aqui, todas as estratégias falharam
+    raise RuntimeError(f"FFmpeg failed all strategies. Last error: {last_error}")
 
 @app.route("/api/health", methods=["GET"])
 def health():
@@ -163,9 +159,7 @@ def download_video():
     
     if is_tiktok:
         format_selector = (
-            "best[vcodec!=none][acodec!=none]/"  # Melhor com áudio
-            "best[acodec!=none]/"  # Com áudio mas qualidade reduzida
-            "best"  # Qualquer coisa (sem áudio se necessário)
+            "best[ext=mp4]/best"  # Preferir MP4 já pronto para evitar conversão
         )
     else:
         format_selector = (
@@ -196,7 +190,8 @@ def download_video():
         "socket_timeout": 60,
         "http_headers": http_headers,
         "extractor_args": {},
-        "retries": 3,  # Retry até 3x para TikTok instável
+        "retries": 3,
+        "skip_unavailable_fragments": True,
     }
     
     # Configurações extras para TikTok
@@ -245,6 +240,28 @@ def download_video():
                 error_msg = "TikTok bloqueou o download. Tente: 1) Clicar em outro vídeo e voltar 2) Usar uma URL diferente"
             return jsonify({"error": error_msg}), 400
 
+        # Otimização: Se o arquivo já é MP4, apenas renomeia (evita conversão demorada)
+        if raw_file.suffix.lower() == ".mp4":
+            try:
+                shutil.copy2(raw_file, final_path)
+                # Limpa arquivo bruto
+                for file in DOWNLOAD_DIR.glob(f"{job_id}-raw*"):
+                    try:
+                        if file.name != final_filename:
+                            file.unlink()
+                    except Exception:
+                        pass
+                
+                return jsonify({
+                    "success": True,
+                    "filename": final_filename,
+                    "download_url": f"/downloads/{final_filename}",
+                    "ffmpeg_available": True
+                })
+            except Exception as e:
+                pass  # Se copiar falhar, continua com conversão
+
+        # Conversão necessária (arquivo não é MP4 ou cópia falhou)
         try:
             convert_to_quicktime_mp4(raw_file, final_path)
         except subprocess.TimeoutExpired:
