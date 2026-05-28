@@ -48,14 +48,14 @@ def clean_old_files(max_age_hours=24):
             except Exception:
                 pass
 
-def convert_to_quicktime_mp4(input_file: Path, output_file: Path):
+def convert_to_quicktime_mp4(input_file: Path, output_file: Path, timeout=300):
     """
     Conversão final manual para máxima compatibilidade:
     - vídeo H.264
     - áudio AAC
     - pixel format yuv420p
     - faststart
-    - mapeia áudio se existir
+    - mapeia áudio se existir (com fallback)
     """
     if not FFMPEG_PATH:
         raise RuntimeError("FFmpeg não está disponível. Verifique se imageio-ffmpeg foi instalado.")
@@ -66,7 +66,7 @@ def convert_to_quicktime_mp4(input_file: Path, output_file: Path):
         "-i", str(input_file),
 
         "-map", "0:v:0",
-        "-map", "0:a:0?",
+        "-map", "0:a?",  # Mapeando qualquer áudio disponível (não apenas stream 0)
 
         "-c:v", "libx264",
         "-preset", "veryfast",
@@ -81,15 +81,20 @@ def convert_to_quicktime_mp4(input_file: Path, output_file: Path):
         str(output_file)
     ]
 
-    result = subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True
-    )
+    try:
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout
+        )
 
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr[-2000:])
+        if result.returncode != 0:
+            error_msg = result.stderr[-2000:] if result.stderr else "Erro desconhecido no FFmpeg"
+            raise RuntimeError(f"FFmpeg failed: {error_msg}")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"Conversão FFmpeg excedeu {timeout}s - arquivo muito grande")
 
 @app.route("/api/health", methods=["GET"])
 def health():
@@ -128,13 +133,14 @@ def download_video():
     if is_tiktok_url(url):
         format_selector = (
             "best[ext=mp4][vcodec!=none][acodec!=none]/"
-            "best[vcodec!=none][acodec!=none]/"
+            "best[ext=mp4][acodec!=none]/"
             "bv*+ba/"
             "best"
         )
     else:
         format_selector = (
-            "bv*[vcodec^=avc1]+ba/"
+            "bv[ext=mp4]+ba[ext=m4a]/"
+            "bv*[vcodec^=avc1]+ba[ext=m4a]/"
             "bv*+ba/"
             "best[ext=mp4][vcodec!=none][acodec!=none]/"
             "best"
@@ -149,6 +155,10 @@ def download_video():
         "quiet": True,
         "no_warnings": True,
         "overwrites": True,
+        "socket_timeout": 60,
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        },
     }
 
     try:
@@ -180,8 +190,17 @@ def download_video():
             return jsonify({"error": "Download concluído, mas o arquivo bruto não foi encontrado."}), 500
 
         raw_file = raw_files[0]
+        
+        # Verifica se o arquivo tem tamanho válido
+        if raw_file.stat().st_size == 0:
+            return jsonify({"error": "Arquivo baixado está vazio. O vídeo pode estar privado ou indisponível."}), 400
 
-        convert_to_quicktime_mp4(raw_file, final_path)
+        try:
+            convert_to_quicktime_mp4(raw_file, final_path)
+        except subprocess.TimeoutExpired:
+            return jsonify({"error": "Arquivo muito grande - conversão excedeu 10 minutos. Tente um vídeo menor."}), 408
+        except Exception as e:
+            return jsonify({"error": f"Falha ao processar áudio/vídeo: {str(e)}"}), 500
 
         # Limpa arquivos brutos do job depois da conversão.
         for file in DOWNLOAD_DIR.glob(f"{job_id}-raw*"):
@@ -192,7 +211,7 @@ def download_video():
                 pass
 
         if not final_path.exists() or final_path.stat().st_size == 0:
-            return jsonify({"error": "A conversão final falhou."}), 500
+            return jsonify({"error": "A conversão final falhou - arquivo vazio."}), 500
 
         return jsonify({
             "success": True,
@@ -202,11 +221,11 @@ def download_video():
         })
 
     except Exception as e:
+        error_str = str(e)
         return jsonify({
             "error": "Não foi possível baixar/converter este vídeo.",
-            "details": str(e),
+            "details": error_str[:200],
             "ffmpeg_available": bool(FFMPEG_PATH),
-            "ffmpeg_path": FFMPEG_PATH
         }), 500
 
 @app.route("/downloads/<path:filename>", methods=["GET"])
