@@ -4,11 +4,15 @@ from pathlib import Path
 import yt_dlp
 import uuid
 import time
+import os
+
+try:
+    import imageio_ffmpeg
+    FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
+except Exception:
+    FFMPEG_PATH = None
 
 app = Flask(__name__)
-
-# Em produção, troque "*" pelo domínio do seu Netlify.
-# Exemplo: CORS(app, origins=["https://sua-ferramenta.netlify.app"])
 CORS(app, origins=["*"])
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -41,7 +45,11 @@ def clean_old_files(max_age_hours=24):
 
 @app.route("/api/health", methods=["GET"])
 def health():
-    return jsonify({"ok": True})
+    return jsonify({
+        "ok": True,
+        "ffmpeg_available": bool(FFMPEG_PATH),
+        "ffmpeg_path": FFMPEG_PATH
+    })
 
 @app.route("/api/download", methods=["POST"])
 def download_video():
@@ -57,19 +65,29 @@ def download_video():
         return jsonify({"error": "Esta ferramenta aceita apenas links do Instagram ou TikTok."}), 400
 
     job_id = str(uuid.uuid4())[:8]
+    output_template = str(DOWNLOAD_DIR / f"{job_id}-%(title).120s.%(ext)s")
 
-    # Versão compatível com Render Free:
-    # sem apt-get e sem script de instalação do FFmpeg.
-    # O yt-dlp tenta usar o FFmpeg disponível no ambiente para recodificar em MP4.
     ydl_opts = {
-        "outtmpl": str(DOWNLOAD_DIR / f"{job_id}-%(title).120s.%(ext)s"),
-        "format": "bv*+ba/b",
+        "outtmpl": output_template,
+        "format": "bv*[vcodec^=avc1]+ba[acodec^=mp4a]/b[ext=mp4]/bv*+ba/b",
         "merge_output_format": "mp4",
         "recodevideo": "mp4",
+        "postprocessor_args": {
+            "VideoConvertor": [
+                "-c:v", "libx264",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-movflags", "+faststart"
+            ]
+        },
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
     }
+
+    if FFMPEG_PATH:
+        ydl_opts["ffmpeg_location"] = FFMPEG_PATH
 
     try:
         before = set(DOWNLOAD_DIR.glob("*"))
@@ -80,24 +98,33 @@ def download_video():
         after = set(DOWNLOAD_DIR.glob("*"))
         new_files = sorted(after - before, key=lambda p: p.stat().st_mtime, reverse=True)
 
-        mp4_files = [file for file in new_files if file.suffix.lower() == ".mp4"]
-        final_files = mp4_files or new_files
+        mp4_files = [
+            file for file in new_files
+            if file.suffix.lower() == ".mp4" and not file.name.endswith(".part")
+        ]
 
-        if not final_files:
-            return jsonify({"error": "Download concluído, mas o arquivo não foi encontrado."}), 500
+        if not mp4_files:
+            return jsonify({
+                "error": "O vídeo foi baixado, mas não foi convertido corretamente para MP4.",
+                "ffmpeg_available": bool(FFMPEG_PATH),
+                "ffmpeg_path": FFMPEG_PATH
+            }), 500
 
-        filename = final_files[0].name
+        filename = mp4_files[0].name
 
         return jsonify({
             "success": True,
             "filename": filename,
-            "download_url": f"/downloads/{filename}"
+            "download_url": f"/downloads/{filename}",
+            "ffmpeg_available": bool(FFMPEG_PATH)
         })
 
     except Exception as e:
         return jsonify({
-            "error": "Não foi possível baixar/converter este vídeo. Verifique se o link é público e autorizado.",
-            "details": str(e)
+            "error": "Não foi possível baixar/converter este vídeo.",
+            "details": str(e),
+            "ffmpeg_available": bool(FFMPEG_PATH),
+            "ffmpeg_path": FFMPEG_PATH
         }), 500
 
 @app.route("/downloads/<path:filename>", methods=["GET"])

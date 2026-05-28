@@ -1,10 +1,8 @@
 # Backend Flask - Social Downloader
 
-Backend atualizado para converter os vídeos para MP4 compatível com Mac/QuickTime:
-- Vídeo: H.264
-- Áudio: AAC
-- Container: MP4
-- `faststart` ativado
+Versão corrigida para Render.
+
+Esta versão usa `imageio-ffmpeg`, então não precisa instalar FFmpeg com `apt-get`.
 
 ## Render
 
@@ -12,7 +10,7 @@ Use:
 
 ```bash
 Build Command:
-./render-build.sh
+pip install -r requirements.txt
 ```
 
 ```bash
@@ -20,10 +18,10 @@ Start Command:
 gunicorn app:app
 ```
 
-Se o Render reclamar de permissão no build script, use este Build Command:
+Não use:
 
 ```bash
-chmod +x render-build.sh && ./render-build.sh
+apt-get install ffmpeg
 ```
 
 ## Teste
@@ -31,11 +29,16 @@ chmod +x render-build.sh && ./render-build.sh
 Depois do deploy, abra:
 
 ```txt
-https://sua-api.onrender.com/api/health
+https://instadownload-mfjw.onrender.com/api/health
 ```
 
-Deve retornar:
+O ideal é retornar algo como:
 
 ```json
-{"ok": true}
+{
+  "ok": true,
+  "ffmpeg_available": true
+}
 ```
+
+Se `ffmpeg_available` vier `false`, o Render não instalou as dependências corretamente.
