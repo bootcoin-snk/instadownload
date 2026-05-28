@@ -11,7 +11,14 @@ import json
 try:
     import imageio_ffmpeg
     FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
-    FFPROBE_PATH = imageio_ffmpeg.get_ffprobe_exe()
+    FFPROBE_PATH = getattr(imageio_ffmpeg, "get_ffprobe_exe", None)
+    if callable(FFPROBE_PATH):
+        try:
+            FFPROBE_PATH = imageio_ffmpeg.get_ffprobe_exe()
+        except Exception:
+            FFPROBE_PATH = None
+    else:
+        FFPROBE_PATH = None
 except Exception:
     FFMPEG_PATH = None
     FFPROBE_PATH = None
