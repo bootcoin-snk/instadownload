@@ -52,21 +52,22 @@ def convert_to_quicktime_mp4(input_file: Path, output_file: Path, timeout=300):
     """
     Conversão final manual para máxima compatibilidade:
     - vídeo H.264
-    - áudio AAC
+    - áudio AAC (se disponível)
     - pixel format yuv420p
     - faststart
-    - mapeia áudio se existir (com fallback)
+    - mapeia áudio se existir (com fallback para vídeo-only)
     """
     if not FFMPEG_PATH:
         raise RuntimeError("FFmpeg não está disponível. Verifique se imageio-ffmpeg foi instalado.")
 
+    # Tenta com áudio primeiro
     cmd = [
         FFMPEG_PATH,
         "-y",
         "-i", str(input_file),
 
         "-map", "0:v:0",
-        "-map", "0:a?",  # Mapeando qualquer áudio disponível (não apenas stream 0)
+        "-map", "0:a?",  # Mapeando qualquer áudio disponível
 
         "-c:v", "libx264",
         "-preset", "veryfast",
@@ -91,8 +92,36 @@ def convert_to_quicktime_mp4(input_file: Path, output_file: Path, timeout=300):
         )
 
         if result.returncode != 0:
-            error_msg = result.stderr[-2000:] if result.stderr else "Erro desconhecido no FFmpeg"
-            raise RuntimeError(f"FFmpeg failed: {error_msg}")
+            # Se falhar, tenta sem áudio como fallback
+            stderr_msg = result.stderr.lower()
+            if "audio" in stderr_msg or "stream" in stderr_msg:
+                cmd_no_audio = [
+                    FFMPEG_PATH,
+                    "-y",
+                    "-i", str(input_file),
+                    "-map", "0:v:0",
+                    "-c:v", "libx264",
+                    "-preset", "veryfast",
+                    "-crf", "23",
+                    "-pix_fmt", "yuv420p",
+                    "-movflags", "+faststart",
+                    str(output_file)
+                ]
+                
+                result = subprocess.run(
+                    cmd_no_audio,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=timeout
+                )
+                
+                if result.returncode != 0:
+                    error_msg = result.stderr[-2000:] if result.stderr else "Erro desconhecido no FFmpeg"
+                    raise RuntimeError(f"FFmpeg failed: {error_msg}")
+            else:
+                error_msg = result.stderr[-2000:] if result.stderr else "Erro desconhecido no FFmpeg"
+                raise RuntimeError(f"FFmpeg failed: {error_msg}")
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"Conversão FFmpeg excedeu {timeout}s - arquivo muito grande")
 
@@ -130,12 +159,13 @@ def download_video():
 
     # TikTok costuma funcionar melhor priorizando arquivo único com áudio.
     # Instagram costuma precisar de vídeo+áudio separados e merge.
-    if is_tiktok_url(url):
+    is_tiktok = is_tiktok_url(url)
+    
+    if is_tiktok:
         format_selector = (
-            "best[ext=mp4][vcodec!=none][acodec!=none]/"
-            "best[ext=mp4][acodec!=none]/"
-            "bv*+ba/"
-            "best"
+            "best[vcodec!=none][acodec!=none]/"  # Melhor com áudio
+            "best[acodec!=none]/"  # Com áudio mas qualidade reduzida
+            "best"  # Qualquer coisa (sem áudio se necessário)
         )
     else:
         format_selector = (
@@ -145,6 +175,14 @@ def download_video():
             "best[ext=mp4][vcodec!=none][acodec!=none]/"
             "best"
         )
+
+    # Headers específicos para cada plataforma
+    http_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    
+    if is_tiktok:
+        http_headers["Referer"] = "https://www.tiktok.com/"
 
     ydl_opts = {
         "outtmpl": raw_template,
@@ -156,16 +194,22 @@ def download_video():
         "no_warnings": True,
         "overwrites": True,
         "socket_timeout": 60,
-        "http_headers": {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        },
+        "http_headers": http_headers,
+        "extractor_args": {},
+        "retries": 3,  # Retry até 3x para TikTok instável
     }
+    
+    # Configurações extras para TikTok
+    if is_tiktok:
+        ydl_opts["extractor_args"] = {
+            "tiktok": ["--api-hostname=api16-normal-c-useast1a.tiktokv.com"]
+        }
 
     try:
         before = set(DOWNLOAD_DIR.glob(f"{job_id}-raw*"))
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
+            info = ydl.download([url])
 
         after = set(DOWNLOAD_DIR.glob(f"{job_id}-raw*"))
         raw_files = sorted(after - before, key=lambda p: p.stat().st_mtime, reverse=True)
@@ -187,13 +231,19 @@ def download_video():
         ]
 
         if not raw_files:
-            return jsonify({"error": "Download concluído, mas o arquivo bruto não foi encontrado."}), 500
+            error_msg = "Download concluído, mas o arquivo bruto não foi encontrado."
+            if is_tiktok:
+                error_msg += " TikTok pode estar bloqueando ou o vídeo pode estar indisponível."
+            return jsonify({"error": error_msg}), 500
 
         raw_file = raw_files[0]
         
         # Verifica se o arquivo tem tamanho válido
         if raw_file.stat().st_size == 0:
-            return jsonify({"error": "Arquivo baixado está vazio. O vídeo pode estar privado ou indisponível."}), 400
+            error_msg = "Arquivo baixado está vazio. O vídeo pode estar privado ou indisponível."
+            if is_tiktok:
+                error_msg = "TikTok bloqueou o download. Tente: 1) Clicar em outro vídeo e voltar 2) Usar uma URL diferente"
+            return jsonify({"error": error_msg}), 400
 
         try:
             convert_to_quicktime_mp4(raw_file, final_path)
@@ -221,7 +271,26 @@ def download_video():
         })
 
     except Exception as e:
-        error_str = str(e)
+        error_str = str(e).lower()
+        
+        # Mensagens de erro específicas para TikTok
+        if is_tiktok:
+            if "403" in error_str or "forbidden" in error_str:
+                return jsonify({
+                    "error": "TikTok bloqueou este download (erro 403). Tente um vídeo diferente ou aguarde alguns minutos.",
+                    "ffmpeg_available": bool(FFMPEG_PATH),
+                }), 403
+            elif "404" in error_str or "not found" in error_str:
+                return jsonify({
+                    "error": "Vídeo TikTok não encontrado. Verifique se a URL é válida ou se o vídeo foi deletado.",
+                    "ffmpeg_available": bool(FFMPEG_PATH),
+                }), 404
+            elif "timeout" in error_str or "timed out" in error_str:
+                return jsonify({
+                    "error": "Conexão com TikTok expirou. A plataforma está lenta ou bloqueando. Tente novamente.",
+                    "ffmpeg_available": bool(FFMPEG_PATH),
+                }), 504
+        
         return jsonify({
             "error": "Não foi possível baixar/converter este vídeo.",
             "details": error_str[:200],
