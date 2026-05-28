@@ -1,14 +1,20 @@
 # Backend Flask - Social Downloader
 
-Correção para TikTok sem áudio.
+Versão robusta para Instagram + TikTok.
 
-Esta versão prioriza baixar arquivos que já venham com vídeo + áudio juntos,
-o que resolve o caso comum do TikTok. Quando necessário, ainda usa FFmpeg via
-`imageio-ffmpeg` para mesclar e converter para MP4 compatível com Mac/QuickTime.
+Correções:
+- Usa `imageio-ffmpeg`, sem apt-get.
+- Baixa o vídeo com `yt-dlp`.
+- Depois converte manualmente o arquivo final para:
+  - MP4
+  - H.264
+  - AAC
+  - yuv420p
+  - faststart
 
 ## Render
 
-Use:
+Use exatamente:
 
 ```bash
 Build Command:
@@ -20,19 +26,20 @@ Start Command:
 gunicorn app:app
 ```
 
+Não use `apt-get`.
+
 ## Teste
 
-Depois do deploy:
+Depois do deploy, abra:
 
 ```txt
 https://instadownload-mfjw.onrender.com/api/health
 ```
 
-O ideal é retornar:
+Precisa aparecer:
 
 ```json
-{
-  "ok": true,
-  "ffmpeg_available": true
-}
+"ffmpeg_available": true
 ```
+
+Depois teste novamente Instagram e TikTok.
