@@ -58,28 +58,17 @@ def download_video():
 
     job_id = str(uuid.uuid4())[:8]
 
-    # Configuração ajustada para gerar MP4 compatível com QuickTime/Mac:
-    # H.264 para vídeo + AAC para áudio + faststart.
+    # Versão compatível com Render Free:
+    # sem apt-get e sem script de instalação do FFmpeg.
+    # O yt-dlp tenta usar o FFmpeg disponível no ambiente para recodificar em MP4.
     ydl_opts = {
         "outtmpl": str(DOWNLOAD_DIR / f"{job_id}-%(title).120s.%(ext)s"),
         "format": "bv*+ba/b",
         "merge_output_format": "mp4",
+        "recodevideo": "mp4",
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
-
-        "postprocessors": [
-            {
-                "key": "FFmpegVideoConvertor",
-                "preferedformat": "mp4"
-            }
-        ],
-
-        "postprocessor_args": [
-            "-c:v", "libx264",
-            "-c:a", "aac",
-            "-movflags", "+faststart"
-        ]
     }
 
     try:
@@ -91,7 +80,6 @@ def download_video():
         after = set(DOWNLOAD_DIR.glob("*"))
         new_files = sorted(after - before, key=lambda p: p.stat().st_mtime, reverse=True)
 
-        # Garante preferência por MP4 final, caso o yt-dlp gere arquivos temporários.
         mp4_files = [file for file in new_files if file.suffix.lower() == ".mp4"]
         final_files = mp4_files or new_files
 
