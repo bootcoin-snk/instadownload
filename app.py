@@ -333,15 +333,43 @@ def download_video():
                 error_msg = "TikTok bloqueou o download. Tente: 1) Clicar em outro vídeo e voltar 2) Usar uma URL diferente"
             return jsonify({"error": error_msg}), 400
 
-        # Se o arquivo já é MP4 com áudio e vídeo, apenas copia para evitar conversão danificada.
+        # Se o arquivo já é MP4 com áudio e vídeo, tenta remuxar para evitar problemas de container.
         if raw_file.suffix.lower() == ".mp4":
             probe = probe_streams(raw_file)
             if probe["has_video"] and probe["has_audio"]:
-                try:
-                    shutil.copy2(raw_file, final_path)
-                except Exception:
-                    pass
-                else:
+                success = False
+
+                if FFMPEG_PATH:
+                    try:
+                        remux_cmd = [
+                            FFMPEG_PATH,
+                            "-y",
+                            "-i", str(raw_file),
+                            "-c", "copy",
+                            "-movflags", "+faststart",
+                            str(final_path),
+                        ]
+                        remux_result = subprocess.run(
+                            remux_cmd,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            text=True,
+                            timeout=120
+                        )
+                        if remux_result.returncode == 0 and final_path.exists() and final_path.stat().st_size > 0:
+                            success = True
+                    except Exception:
+                        success = False
+
+                if not success:
+                    try:
+                        shutil.copy2(raw_file, final_path)
+                    except Exception:
+                        success = False
+                    else:
+                        success = final_path.exists() and final_path.stat().st_size > 0
+
+                if success:
                     for file in DOWNLOAD_DIR.glob(f"{job_id}-raw*"):
                         try:
                             if file.name != final_filename:
