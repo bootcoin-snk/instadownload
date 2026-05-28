@@ -16,6 +16,12 @@ except Exception:
     FFMPEG_PATH = None
     FFPROBE_PATH = None
 
+# Se o pacote imageio-ffmpeg não fornecer um executável, tente usar o FFmpeg do sistema.
+if not FFMPEG_PATH:
+    FFMPEG_PATH = shutil.which("ffmpeg")
+if not FFPROBE_PATH:
+    FFPROBE_PATH = shutil.which("ffprobe")
+
 app = Flask(__name__)
 CORS(app, origins=["*"])
 
